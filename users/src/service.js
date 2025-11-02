@@ -1,8 +1,9 @@
 const Joi = require('joi');
 
 class UserService {
-  constructor(userRepository) {
+  constructor(userRepository, messageBroker = null) {
     this.userRepository = userRepository;
+    this.messageBroker = messageBroker;
 
     this.createSchema = Joi.object({
       firstName: Joi.string().required(),
@@ -47,9 +48,41 @@ class UserService {
   }
 
   async updateUser(userId, updateData) {
-    const user = await this.userRepository.update(userId, updateData);
-    if (!user) {
+    const existingUser = await this.userRepository.findById(userId);
+    if (!existingUser) {
       throw new Error('User not found');
+    }
+
+    const user = await this.userRepository.update(userId, updateData);
+
+    // Publish USER_UPDATED event
+    try {
+      if (this.messageBroker?.isConnected()) {
+        await this.messageBroker.publishUserEvent('USER_UPDATED', {
+          userId: user.id,
+          updates: {
+            firstName: user.firstName,
+            lastName: user.lastName,
+            email: user.email,
+            phone: user.phone
+          },
+          previousData: {
+            firstName: existingUser.firstName,
+            lastName: existingUser.lastName,
+            email: existingUser.email,
+            phone: existingUser.phone
+          },
+          updatedAt: user.updatedAt
+        }, {
+          metadata: {
+            source: 'users-service',
+            correlationId: this.generateCorrelationId()
+          }
+        });
+        console.log(`📤 Published USER_UPDATED event for user ${user.id}`);
+      }
+    } catch (error) {
+      console.error('⚠️  Failed to publish USER_UPDATED event:', error.message);
     }
 
     return {
@@ -60,9 +93,32 @@ class UserService {
   }
 
   async deleteUser(userId) {
+    const user = await this.userRepository.findById(userId);
+    if (!user) {
+      throw new Error('User not found');
+    }
+
     const deleted = await this.userRepository.delete(userId);
     if (!deleted) {
       throw new Error('User not found');
+    }
+
+    // Publish USER_DELETED event
+    try {
+      if (this.messageBroker?.isConnected()) {
+        await this.messageBroker.publishUserEvent('USER_DELETED', {
+          userId: userId,
+          deletedAt: new Date()
+        }, {
+          metadata: {
+            source: 'users-service',
+            correlationId: this.generateCorrelationId()
+          }
+        });
+        console.log(`📤 Published USER_DELETED event for user ${userId}`);
+      }
+    } catch (error) {
+      console.error('⚠️  Failed to publish USER_DELETED event:', error.message);
     }
 
     return {
@@ -93,6 +149,10 @@ class UserService {
       email: user.email,
       phone: user.phone
     }));
+  }
+
+  generateCorrelationId() {
+    return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   }
 }
 

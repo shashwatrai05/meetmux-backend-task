@@ -2,14 +2,17 @@ const express = require('express');
 const cors = require('cors');
 const UserRepository = require('./repository');
 const UserService = require('./service');
+const MessageBroker = require('./message-broker');
 
 class UsersService {
   constructor() {
     this.app = express();
     this.port = process.env.PORT || 3001;
+    this.rabbitmqUrl = process.env.RABBITMQ_URL || 'amqp://localhost:5672';
 
     this.userRepository = new UserRepository();
-    this.userService = new UserService(this.userRepository);
+    this.messageBroker = new MessageBroker(this.rabbitmqUrl);
+    this.userService = new UserService(this.userRepository, this.messageBroker);
     
     this.setupMiddleware();
     this.setupRoutes();
@@ -27,7 +30,13 @@ class UsersService {
 
   setupRoutes() {
     this.app.get('/health', (req, res) => {
-      res.json({ success: true, service: 'users-service', status: 'healthy' });
+      const messageBrokerHealthy = this.messageBroker?.isConnected() || false;
+      res.json({ 
+        success: true, 
+        service: 'users-service', 
+        status: 'healthy',
+        messageBroker: messageBrokerHealthy ? 'healthy' : 'unhealthy'
+      });
     });
 
     this.app.post('/api/users', this.createUser.bind(this));
@@ -111,10 +120,37 @@ class UsersService {
     }
   }
 
-  start() {
-    this.app.listen(this.port, () => {
-      console.log(`🚀 Simple Users Service running on port ${this.port}`);
-    });
+  async start() {
+    try {
+      // Connect to RabbitMQ
+      await this.messageBroker.connect();
+
+      // Start HTTP server
+      this.app.listen(this.port, () => {
+        console.log(`🚀 Users Service running on port ${this.port}`);
+        console.log(`🐰 RabbitMQ URL: ${this.rabbitmqUrl}`);
+      });
+
+      // Graceful shutdown
+      process.on('SIGTERM', async () => {
+        console.log('SIGTERM received, shutting down gracefully...');
+        await this.messageBroker.close();
+        process.exit(0);
+      });
+
+      process.on('SIGINT', async () => {
+        console.log('SIGINT received, shutting down gracefully...');
+        await this.messageBroker.close();
+        process.exit(0);
+      });
+
+    } catch (error) {
+      console.error('❌ Failed to start Users Service:', error.message);
+      // Service can still run without RabbitMQ for basic operations
+      this.app.listen(this.port, () => {
+        console.log(`⚠️  Users Service running on port ${this.port} (RabbitMQ unavailable)`);
+      });
+    }
   }
 }
 
