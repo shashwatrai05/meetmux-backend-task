@@ -3,24 +3,15 @@ const cors = require('cors');
 const OrderRepository = require('./repository');
 const OrderService = require('./service');
 const UserClient = require('./user-client');
-const MessageBroker = require('./message-broker');
-const OrderEventConsumer = require('./order-event-consumer');
-const UserEventConsumer = require('./user-event-consumer');
 
 class OrdersService {
   constructor() {
     this.app = express();
     this.port = process.env.PORT || 3002;
-    this.rabbitmqUrl = process.env.RABBITMQ_URL || 'amqp://localhost:5672';
 
     this.orderRepository = new OrderRepository();
     this.userClient = new UserClient();
-    this.messageBroker = new MessageBroker(this.rabbitmqUrl);
-    this.orderService = new OrderService(
-      this.orderRepository, 
-      this.userClient,
-      this.messageBroker
-    );
+    this.orderService = new OrderService(this.orderRepository, this.userClient);
     
     this.setupMiddleware();
     this.setupRoutes();
@@ -37,6 +28,7 @@ class OrdersService {
   }
 
   setupRoutes() {
+
     this.app.get('/health', this.getHealth.bind(this));
 
     this.app.post('/api/orders', this.createOrder.bind(this));
@@ -48,9 +40,8 @@ class OrdersService {
 
     this.app.get('/', (req, res) => {
       res.json({
-        service: 'orders-service',
-        version: '2.0.0',
-        features: ['rabbitmq', 'event-driven'],
+        service: 'simple-orders-service',
+        version: '1.0.0',
         endpoints: {
           health: '/health',
           createOrder: 'POST /api/orders',
@@ -111,12 +102,8 @@ class OrdersService {
 
   async updateOrderStatus(req, res) {
     try {
-      const { status, reason } = req.body;
-      const result = await this.orderService.updateOrderStatus(
-        req.params.id, 
-        status,
-        reason
-      );
+      const { status } = req.body;
+      const result = await this.orderService.updateOrderStatus(req.params.id, status);
       res.json(result);
     } catch (error) {
       if (error.message.includes('not found')) {
@@ -147,56 +134,11 @@ class OrdersService {
     }
   }
 
-  async setupEventConsumers() {
-    try {
-      // Initialize event consumers
-      const orderEventConsumer = new OrderEventConsumer(this.messageBroker);
-      const userEventConsumer = new UserEventConsumer(
-        this.messageBroker, 
-        this.orderRepository
-      );
-
-      await orderEventConsumer.start();
-      await userEventConsumer.start();
-
-      console.log('✅ Event consumers started successfully');
-    } catch (error) {
-      console.error('❌ Failed to start event consumers:', error.message);
-    }
-  }
-
-  async start() {
-    try {
-      // Connect to RabbitMQ first
-      await this.messageBroker.connect();
-
-      // Setup event consumers
-      await this.setupEventConsumers();
-
-      // Start HTTP server
-      this.app.listen(this.port, () => {
-        console.log(`🚀 Orders Service running on port ${this.port}`);
-        console.log(`🔗 Users Service URL: ${this.userClient.baseURL}`);
-        console.log(`🐰 RabbitMQ URL: ${this.rabbitmqUrl}`);
-      });
-
-      // Graceful shutdown
-      process.on('SIGTERM', async () => {
-        console.log('SIGTERM received, shutting down gracefully...');
-        await this.messageBroker.close();
-        process.exit(0);
-      });
-
-      process.on('SIGINT', async () => {
-        console.log('SIGINT received, shutting down gracefully...');
-        await this.messageBroker.close();
-        process.exit(0);
-      });
-
-    } catch (error) {
-      console.error('❌ Failed to start Orders Service:', error.message);
-      process.exit(1);
-    }
+  start() {
+    this.app.listen(this.port, () => {
+      console.log(`🚀 Simple Orders Service running on port ${this.port}`);
+      console.log(`🔗 Users Service URL: ${this.userClient.baseURL}`);
+    });
   }
 }
 
