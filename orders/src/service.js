@@ -1,10 +1,9 @@
 const Joi = require('joi');
 
 class OrderService {
-  constructor(orderRepository, userClient, messageBroker = null) {
+  constructor(orderRepository, userClient) {
     this.orderRepository = orderRepository;
     this.userClient = userClient;
-    this.messageBroker = messageBroker;
     
     this.createSchema = Joi.object({
       userId: Joi.string().required(),
@@ -27,20 +26,18 @@ class OrderService {
   }
 
   async createOrder(orderData) {
-    // Validate input
+
     const { error, value } = this.createSchema.validate(orderData);
     if (error) {
       throw new Error(`Validation error: ${error.details[0].message}`);
     }
 
-    // Verify user exists
     const userProfile = await this.userClient.getUserProfile(value.userId);
     
     if (!userProfile) {
       throw new Error(`User with ID ${value.userId} not found`);
     }
 
-    // Calculate total
     const totalAmount = value.items.reduce((total, item) => {
       return total + (item.quantity * item.unitPrice);
     }, 0);
@@ -51,34 +48,7 @@ class OrderService {
       totalAmount
     };
 
-    // Create order in repository
     const order = await this.orderRepository.create(orderToCreate);
-
-    // Publish ORDER_CREATED event
-    try {
-      if (this.messageBroker?.isConnected()) {
-        await this.messageBroker.publishOrderEvent('ORDER_CREATED', {
-          orderId: order.id,
-          userId: order.userId,
-          userInfo: order.userInfo,
-          items: order.items,
-          totalAmount: order.totalAmount,
-          shippingAddress: order.shippingAddress,
-          status: order.status,
-          createdAt: order.createdAt
-        }, {
-          metadata: {
-            source: 'orders-service',
-            correlationId: this.generateCorrelationId()
-          }
-        });
-        console.log(`📤 Published ORDER_CREATED event for order ${order.id}`);
-      } else {
-        console.log('⚠️  Message broker not connected, skipping event publish');
-      }
-    } catch (error) {
-      console.error('⚠️  Failed to publish ORDER_CREATED event:', error.message);
-    }
 
     return {
       success: true,
@@ -120,49 +90,20 @@ class OrderService {
     };
   }
 
-  async updateOrderStatus(orderId, status, reason = null) {
+  async updateOrderStatus(orderId, status) {
     const validStatuses = ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled'];
     if (!validStatuses.includes(status)) {
       throw new Error(`Invalid status. Must be one of: ${validStatuses.join(', ')}`);
     }
 
-    const order = await this.orderRepository.findById(orderId);
+    const order = await this.orderRepository.updateStatus(orderId, status);
     if (!order) {
       throw new Error('Order not found');
     }
 
-    const previousStatus = order.status;
-    
-    // Update status
-    const updatedOrder = await this.orderRepository.updateStatus(orderId, status);
-
-    // Publish status change event
-    try {
-      if (this.messageBroker?.isConnected()) {
-        const eventType = status === 'cancelled' ? 'ORDER_CANCELLED' : 'ORDER_STATUS_CHANGED';
-        
-        await this.messageBroker.publishOrderEvent(eventType, {
-          orderId: updatedOrder.id,
-          userId: updatedOrder.userId,
-          previousStatus: previousStatus,
-          newStatus: status,
-          reason: reason,
-          updatedAt: updatedOrder.updatedAt
-        }, {
-          metadata: {
-            source: 'orders-service',
-            correlationId: this.generateCorrelationId()
-          }
-        });
-        console.log(`📤 Published ${eventType} event for order ${updatedOrder.id}`);
-      }
-    } catch (error) {
-      console.error(`⚠️  Failed to publish order status event:`, error.message);
-    }
-
     return {
       success: true,
-      data: updatedOrder,
+      data: order,
       message: `Order status updated to ${status}`
     };
   }
@@ -181,24 +122,16 @@ class OrderService {
 
   async getServiceHealth() {
     const userServiceHealthy = await this.userClient.healthCheck();
-    const messageBrokerHealthy = this.messageBroker?.isConnected() || false;
-    
     return {
       success: true,
       data: {
         ordersService: 'healthy',
         usersService: userServiceHealthy ? 'healthy' : 'unhealthy',
-        messageBroker: messageBrokerHealthy ? 'healthy' : 'unhealthy',
         dependencies: {
-          usersServiceUrl: this.userClient.baseURL,
-          messageBrokerConnected: messageBrokerHealthy
+          usersServiceUrl: this.userClient.baseURL
         }
       }
     };
-  }
-
-  generateCorrelationId() {
-    return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   }
 }
 
